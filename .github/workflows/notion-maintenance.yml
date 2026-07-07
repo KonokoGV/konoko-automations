@@ -69,7 +69,7 @@ jobs:
           ]})
           PRIO_MAP = {"High": 0, "Medium": 1, "Low": 2}
           outdated_s = sorted(outdated, key=lambda p: PRIO_MAP.get(
-              p.get("properties", {}).get("Priority", {}).get("select", {}).get("name", "Medium"), 1))
+              ((p.get("properties", {}).get("Priority") or {}).get("select") or {}).get("name", "Medium"), 1))
           n = len(outdated_s); spread = min(n, 5)
           for i, p in enumerate(outdated_s):
               day   = 1 + (i * spread // max(n, 1))
