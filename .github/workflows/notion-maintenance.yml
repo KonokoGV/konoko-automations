@@ -104,5 +104,43 @@ jobs:
             print(f"Archiviert: {title(p)[:50]}")
             fixes += 1
 
+        # 5. Heutige Tasks auf High eskalieren
+        heute_tasks = query(TASKS_DB, {"filter": {"and": [
+            {"property": "Date", "date": {"equals": heute}},
+            {"property": "Status", "status": {"does_not_equal": "Completed"}}
+        ]}})
+        for p in heute_tasks:
+            prio = ((p.get("properties",{}).get("Priority") or {}).get("select") or {}).get("name","")
+            if prio != "High":
+                patch(p["id"], {"Priority": {"select": {"name": "High"}}})
+                print(f"Eskaliert (heute fällig): {title(p)[:40]}")
+                fixes += 1
+
+        # 6. Tasks ohne Datum → Datum nach Priorität zuweisen
+        no_date = query(TASKS_DB, {"filter": {"and": [
+            {"property": "Date", "date": {"is_empty": True}},
+            {"property": "Status", "status": {"does_not_equal": "Completed"}}
+        ]}})
+        PRIO_DAYS = {"High": 1, "Medium": 3, "Low": 5}
+        for p in no_date:
+            prio_name = ((p.get("properties",{}).get("Priority") or {}).get("select") or {}).get("name","Medium")
+            days = PRIO_DAYS.get(prio_name, 3)
+            new_d = (datetime.date.today() + datetime.timedelta(days=days)).isoformat()
+            patch(p["id"], {"Date": {"date": {"start": new_d}}})
+            print(f"Datum gesetzt: {title(p)[:40]} → {new_d} ({prio_name})")
+            fixes += 1
+
+        # 7. Stale "In progress" Tasks (>3 Tage unverändert) → zurück auf Not started
+        in_progress = query(TASKS_DB, {"filter":
+            {"property": "Status", "status": {"equals": "In progress"}}
+        })
+        cutoff = (datetime.date.today() - datetime.timedelta(days=3)).isoformat()
+        for p in in_progress:
+            edited = p.get("last_edited_time", "")[:10]
+            if edited and edited < cutoff:
+                patch(p["id"], {"Status": {"status": {"name": "Not started"}}})
+                print(f"Stale reset: {title(p)[:40]} (zuletzt: {edited})")
+                fixes += 1
+
         print(f"\n{fixes} Fixes")
           PYEOF
