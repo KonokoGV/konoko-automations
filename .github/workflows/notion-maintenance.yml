@@ -2,9 +2,10 @@ name: Notion Maintenance (Mac-unabhaengig)
 
 on:
   schedule:
-    - cron: '50 6 * * *'  # 08:50 Uhr Berlin
+    - cron: '0 8 * * *'   # 10:00 Uhr Berlin
     - cron: '0 11 * * *'  # 13:00 Uhr Berlin
-    - cron: '0 18 * * *'  # 20:00 Uhr Berlin
+    - cron: '0 15 * * *'  # 17:00 Uhr Berlin
+    - cron: '0 19 * * *'  # 21:00 Uhr Berlin
   workflow_dispatch:
 
 jobs:
