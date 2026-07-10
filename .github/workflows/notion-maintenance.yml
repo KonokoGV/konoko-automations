@@ -94,5 +94,14 @@ jobs:
               print(f"Inbox: {title(p)[:40]} -> {prio}")
               fixes += 1
 
-          print(f"\n{fixes} Fixes")
+          # 4. Completed Tasks archivieren
+        completed = query(TASKS_DB, {
+            "filter": {"property": "Status", "status": {"equals": "Done"}}
+        })
+        for p in completed:
+            patch(p["id"], archived=True)
+            print(f"Archiviert: {title(p)[:50]}")
+            fixes += 1
+
+        print(f"\n{fixes} Fixes")
           PYEOF
