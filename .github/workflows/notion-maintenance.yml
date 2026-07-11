@@ -16,6 +16,9 @@ jobs:
       NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
       TASKS_DB: "9a91d552-bf72-824b-8dcf-01e86dc12569"
       DASHBOARD_DB: "2ef1d552-bf72-8027-9469-c2f1afdfcd75"
+      GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+      GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+      GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
 
     steps:
       - name: "1 — Dashboard Cleanup"
@@ -156,10 +159,81 @@ jobs:
           count = 0
           for p in pages.get("results", []):
             edited = p.get("last_edited_time", "")
-            if edited:
-              if datetime.fromisoformat(edited.replace("Z", "+00:00")) < cutoff:
-                api("PATCH", f"/pages/{p['id']}", {"properties": {"Status": {"status": {"name": "Not started"}}}})
-                t = p.get("properties", {}).get("Name", {}).get("title", [])
-                print(f"Reset: {(t[0]['plain_text'] if t else '?')[:50]}"); count += 1
+            if edited and datetime.fromisoformat(edited.replace("Z", "+00:00")) < cutoff:
+              api("PATCH", f"/pages/{p['id']}", {"properties": {"Status": {"status": {"name": "Not started"}}}})
+              t = p.get("properties", {}).get("Name", {}).get("title", [])
+              print(f"Reset: {(t[0]['plain_text'] if t else '?')[:50]}"); count += 1
           print(f"✅ In Progress Reset: {count} zurückgesetzt")
+          EOF
+
+      - name: "7 — Google Kalender: Notion Tasks sync"
+        continue-on-error: true
+        run: |
+          python3 - <<'EOF'
+          import urllib.request, urllib.parse, json, os
+          from datetime import date, timedelta
+
+          # --- Google Access Token holen ---
+          def get_access_token():
+            data = urllib.parse.urlencode({
+              "client_id": os.environ["GOOGLE_CLIENT_ID"],
+              "client_secret": os.environ["GOOGLE_CLIENT_SECRET"],
+              "refresh_token": os.environ["GOOGLE_REFRESH_TOKEN"],
+              "grant_type": "refresh_token"
+            }).encode()
+            req = urllib.request.Request("https://oauth2.googleapis.com/token", data=data)
+            with urllib.request.urlopen(req) as r:
+              return json.loads(r.read())["access_token"]
+
+          token = get_access_token()
+          gcal_headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+          notion_headers = {"Authorization": f"Bearer {os.environ['NOTION_TOKEN']}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"}
+
+          def notion_api(method, path, data=None):
+            req = urllib.request.Request(f"https://api.notion.com/v1{path}", data=json.dumps(data).encode() if data else None, headers=notion_headers, method=method)
+            with urllib.request.urlopen(req) as r: return json.loads(r.read())
+
+          def gcal_api(method, path, data=None):
+            req = urllib.request.Request(f"https://www.googleapis.com/calendar/v3{path}", data=json.dumps(data).encode() if data else None, headers=gcal_headers, method=method)
+            try:
+              with urllib.request.urlopen(req) as r: return json.loads(r.read())
+            except urllib.error.HTTPError as e:
+              print(f"GCal Fehler {e.code}: {e.read()[:200]}"); return {}
+
+          # Notion Tasks mit Datum lesen
+          tasks = notion_api("POST", f"/databases/{os.environ['TASKS_DB']}/query", {
+            "filter": {"and": [
+              {"property": "Date", "date": {"is_not_empty": True}},
+              {"property": "Status", "status": {"does_not_equal": "Completed"}}
+            ]}, "page_size": 100
+          })
+
+          today = date.today()
+          count = 0
+          for p in tasks.get("results", []):
+            props = p.get("properties", {})
+            t = props.get("Name", {}).get("title", [])
+            name = t[0]["plain_text"] if t else ""
+            if not name: continue
+            task_date = (props.get("Date", {}).get("date", {}) or {}).get("start", "")
+            if not task_date: continue
+
+            # Prüfe ob Event schon existiert (suche nach Name + Datum)
+            time_min = f"{task_date}T00:00:00+02:00"
+            time_max = f"{task_date}T23:59:59+02:00"
+            existing = gcal_api("GET", f"/calendars/primary/events?timeMin={urllib.parse.quote(time_min)}&timeMax={urllib.parse.quote(time_max)}&q={urllib.parse.quote(name)}&singleEvents=true")
+            found = any(e.get("summary","") == name for e in existing.get("items", []))
+            if found: continue
+
+            # Event erstellen (ganztägig)
+            event = {
+              "summary": name,
+              "start": {"date": task_date},
+              "end": {"date": task_date},
+              "colorId": "11"
+            }
+            gcal_api("POST", "/calendars/primary/events", event)
+            print(f"📅 Task → Kalender: {name[:50]} ({task_date})"); count += 1
+
+          print(f"✅ Tasks → GCal: {count} erstellt")
           EOF
