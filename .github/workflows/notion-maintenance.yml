@@ -1,146 +1,185 @@
-name: Notion Maintenance (Mac-unabhaengig)
+name: Notion Maintenance
 
 on:
   schedule:
-    - cron: '0 8 * * *'   # 10:00 Uhr Berlin
-    - cron: '0 11 * * *'  # 13:00 Uhr Berlin
-    - cron: '0 15 * * *'  # 17:00 Uhr Berlin
-    - cron: '0 19 * * *'  # 21:00 Uhr Berlin
+    # 4x täglich: 10:00, 13:00, 17:00, 21:00 Berlin = 08:00, 11:00, 15:00, 19:00 UTC
+    - cron: '0 8 * * *'
+    - cron: '0 11 * * *'
+    - cron: '0 15 * * *'
+    - cron: '0 19 * * *'
   workflow_dispatch:
 
 jobs:
   maintain:
     runs-on: ubuntu-latest
+    env:
+      NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+      TASKS_DB: "9a91d552-bf72-824b-8dcf-01e86dc12569"
+      DASHBOARD_DB: "2ef1d552-bf72-8027-9469-c2f1afdfcd75"
+
     steps:
-      - name: Notion Maintenance
+      - name: "1 — Dashboard Cleanup"
         run: |
-          python3 - << 'PYEOF'
-          import json, sys, datetime, urllib.request, urllib.error
+          python3 - <<'EOF'
+          import urllib.request, json, os
+          token = os.environ["NOTION_TOKEN"]
+          db = os.environ["DASHBOARD_DB"]
+          headers = {"Authorization": f"Bearer {token}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"}
+          def api(method, path, data=None):
+            req = urllib.request.Request(f"https://api.notion.com/v1{path}", data=json.dumps(data).encode() if data else None, headers=headers, method=method)
+            with urllib.request.urlopen(req) as r: return json.loads(r.read())
+          pages = api("POST", f"/databases/{db}/query", {"page_size": 100})
+          count = 0
+          for p in pages.get("results", []):
+            t = p.get("properties", {}).get("Name", {}).get("title", [])
+            name = t[0]["plain_text"] if t else ""
+            if not name.startswith("📚"):
+              api("PATCH", f"/pages/{p['id']}", {"archived": True})
+              print(f"Archiviert: {name[:60]}"); count += 1
+          print(f"✅ Dashboard Cleanup: {count} archiviert")
+          EOF
 
-          TOKEN        = "${{ secrets.NOTION_TOKEN }}"
-          TASKS_DB     = "9a91d552-bf72-824b-8dcf-01e86dc12569"
-          DASHBOARD_DB = "2ef1d552-bf72-8027-9469-c2f1afdfcd75"
+      - name: "2 — Alte Tasks: Datum nach vorne schieben"
+        run: |
+          python3 - <<'EOF'
+          import urllib.request, json, os
+          from datetime import date, timedelta
+          token = os.environ["NOTION_TOKEN"]
+          db = os.environ["TASKS_DB"]
+          headers = {"Authorization": f"Bearer {token}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"}
+          def api(method, path, data=None):
+            req = urllib.request.Request(f"https://api.notion.com/v1{path}", data=json.dumps(data).encode() if data else None, headers=headers, method=method)
+            with urllib.request.urlopen(req) as r: return json.loads(r.read())
+          today = date.today()
+          pages = api("POST", f"/databases/{db}/query", {"filter": {"and": [{"property": "Date", "date": {"before": str(today)}}, {"property": "Status", "status": {"does_not_equal": "Completed"}}]}, "page_size": 100})
+          priority_offset = {"High": 0, "Medium": 1, "Low": 3}
+          count = 0
+          for p in pages.get("results", []):
+            props = p.get("properties", {})
+            prio_opts = props.get("Priority", {}).get("select", {})
+            prio = prio_opts.get("name", "Medium") if prio_opts else "Medium"
+            new_date = str(today + timedelta(days=priority_offset.get(prio, 1)))
+            api("PATCH", f"/pages/{p['id']}", {"properties": {"Date": {"date": {"start": new_date}}}})
+            t = props.get("Name", {}).get("title", [])
+            print(f"Verschoben [{prio}] → {new_date}: {(t[0]['plain_text'] if t else '?')[:50]}"); count += 1
+          print(f"✅ Alte Tasks: {count} verschoben")
+          EOF
 
-          HEADERS = {
-              "Authorization": f"Bearer {TOKEN}",
-              "Notion-Version": "2022-06-28",
-              "Content-Type": "application/json",
-          }
+      - name: "3 — Inbox kategorisieren"
+        run: |
+          python3 - <<'EOF'
+          import urllib.request, json, os
+          token = os.environ["NOTION_TOKEN"]
+          db = os.environ["TASKS_DB"]
+          headers = {"Authorization": f"Bearer {token}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"}
+          def api(method, path, data=None):
+            req = urllib.request.Request(f"https://api.notion.com/v1{path}", data=json.dumps(data).encode() if data else None, headers=headers, method=method)
+            with urllib.request.urlopen(req) as r: return json.loads(r.read())
+          keywords = {"ZPO": "ZPO", "Zivilprozess": "ZPO", "FamR": "Familienrecht", "Familie": "Familienrecht", "HR": "Handelsrecht", "HGB": "Handelsrecht", "StR": "Strafrecht", "Straf": "Strafrecht", "VerwR": "Verwaltungsrecht", "BGB": "BGB AT", "Schuldrecht": "Schuldrecht", "EuR": "Europarecht", "Europa": "Europarecht", "Völker": "Völkerrecht"}
+          pages = api("POST", f"/databases/{db}/query", {"filter": {"property": "Status", "status": {"equals": "Not started"}}, "page_size": 100})
+          count = 0
+          for p in pages.get("results", []):
+            props = p.get("properties", {})
+            t = props.get("Name", {}).get("title", [])
+            name = t[0]["plain_text"] if t else ""
+            cat = props.get("Category", {}).get("select", None)
+            if cat: continue
+            for kw, fach in keywords.items():
+              if kw.lower() in name.lower():
+                api("PATCH", f"/pages/{p['id']}", {"properties": {"Category": {"select": {"name": fach}}}})
+                print(f"Kategorisiert: {name[:40]} → {fach}"); count += 1; break
+          print(f"✅ Inbox: {count} kategorisiert")
+          EOF
 
-          heute = datetime.date.today().isoformat()
+      - name: "4 — Completed Tasks archivieren"
+        run: |
+          python3 - <<'EOF'
+          import urllib.request, json, os
+          token = os.environ["NOTION_TOKEN"]
+          db = os.environ["TASKS_DB"]
+          headers = {"Authorization": f"Bearer {token}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"}
+          def api(method, path, data=None):
+            req = urllib.request.Request(f"https://api.notion.com/v1{path}", data=json.dumps(data).encode() if data else None, headers=headers, method=method)
+            with urllib.request.urlopen(req) as r: return json.loads(r.read())
+          pages = api("POST", f"/databases/{db}/query", {"filter": {"property": "Status", "status": {"equals": "Completed"}}, "page_size": 100})
+          count = 0
+          for p in pages.get("results", []):
+            api("PATCH", f"/pages/{p['id']}", {"archived": True})
+            t = p.get("properties", {}).get("Name", {}).get("title", [])
+            print(f"Archiviert: {(t[0]['plain_text'] if t else '?')[:60]}"); count += 1
+          print(f"✅ Completed: {count} archiviert")
+          EOF
 
-          def api(method, path, body=None):
-              url  = f"https://api.notion.com/v1/{path}"
-              data = json.dumps(body).encode() if body else None
-              req  = urllib.request.Request(url, data=data, headers=HEADERS, method=method)
-              try:
-                  with urllib.request.urlopen(req, timeout=15) as r:
-                      return json.loads(r.read())
-              except urllib.error.HTTPError as e:
-                  print(f"HTTP {e.code} on {method} {path}", file=sys.stderr)
-                  return {}
+      - name: "5 — Heutige Tasks → High Priority"
+        run: |
+          python3 - <<'EOF'
+          import urllib.request, json, os
+          from datetime import date
+          token = os.environ["NOTION_TOKEN"]
+          db = os.environ["TASKS_DB"]
+          headers = {"Authorization": f"Bearer {token}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"}
+          def api(method, path, data=None):
+            req = urllib.request.Request(f"https://api.notion.com/v1{path}", data=json.dumps(data).encode() if data else None, headers=headers, method=method)
+            with urllib.request.urlopen(req) as r: return json.loads(r.read())
+          today = str(date.today())
+          pages = api("POST", f"/databases/{db}/query", {"filter": {"and": [{"property": "Date", "date": {"equals": today}}, {"property": "Status", "status": {"does_not_equal": "Completed"}}]}, "page_size": 100})
+          count = 0
+          for p in pages.get("results", []):
+            props = p.get("properties", {})
+            prio = props.get("Priority", {}).get("select", {})
+            if prio and prio.get("name") == "High": continue
+            api("PATCH", f"/pages/{p['id']}", {"properties": {"Priority": {"select": {"name": "High"}}}})
+            t = props.get("Name", {}).get("title", [])
+            print(f"→ High: {(t[0]['plain_text'] if t else '?')[:50]}"); count += 1
+          print(f"✅ Heute: {count} auf High")
+          EOF
 
-          def query(db, filt=None):
-              body = {"page_size": 100}
-              if filt: body["filter"] = filt
-              return api("POST", f"databases/{db}/query", body).get("results", [])
+      - name: "6 — Tasks ohne Datum: Auto-Datum"
+        run: |
+          python3 - <<'EOF'
+          import urllib.request, json, os
+          from datetime import date, timedelta
+          token = os.environ["NOTION_TOKEN"]
+          db = os.environ["TASKS_DB"]
+          headers = {"Authorization": f"Bearer {token}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"}
+          def api(method, path, data=None):
+            req = urllib.request.Request(f"https://api.notion.com/v1{path}", data=json.dumps(data).encode() if data else None, headers=headers, method=method)
+            with urllib.request.urlopen(req) as r: return json.loads(r.read())
+          today = date.today()
+          offsets = {"High": 1, "Medium": 3, "Low": 5}
+          pages = api("POST", f"/databases/{db}/query", {"filter": {"and": [{"property": "Date", "date": {"is_empty": True}}, {"property": "Status", "status": {"does_not_equal": "Completed"}}]}, "page_size": 100})
+          count = 0
+          for p in pages.get("results", []):
+            props = p.get("properties", {})
+            prio_opts = props.get("Priority", {}).get("select", {})
+            prio = prio_opts.get("name", "Medium") if prio_opts else "Medium"
+            new_date = str(today + timedelta(days=offsets.get(prio, 3)))
+            api("PATCH", f"/pages/{p['id']}", {"properties": {"Date": {"date": {"start": new_date}}}})
+            t = props.get("Name", {}).get("title", [])
+            print(f"Datum [{prio}] → {new_date}: {(t[0]['plain_text'] if t else '?')[:50]}"); count += 1
+          print(f"✅ Auto-Datum: {count} datiert")
+          EOF
 
-          def patch(pid, props=None, archived=False):
-              body = {}
-              if props:    body["properties"] = props
-              if archived: body["archived"]    = True
-              api("PATCH", f"pages/{pid}", body)
-
-          def title(p):
-              arr = p.get("properties", {}).get("Name", {}).get("title", [])
-              return arr[0]["plain_text"] if arr else ""
-
-          fixes = 0
-
-          # 1. Dashboard cleanup
-          for p in query(DASHBOARD_DB):
-              name = title(p)
-              if not name.startswith("\U0001f4da"):
-                  patch(p["id"], archived=True)
-                  print(f"Dashboard archiviert: {name[:60]}")
-                  fixes += 1
-
-          # 2. Veraltete Dates ueber die Woche verteilen (High zuerst)
-          outdated = query(TASKS_DB, {"and": [
-              {"property": "Date",   "date":   {"before": heute}},
-              {"property": "Status", "status": {"does_not_equal": "Completed"}}
-          ]})
-          PRIO_MAP = {"High": 0, "Medium": 1, "Low": 2}
-          outdated_s = sorted(outdated, key=lambda p: PRIO_MAP.get(
-              ((p.get("properties", {}).get("Priority") or {}).get("select") or {}).get("name", "Medium"), 1))
-          n = len(outdated_s); spread = min(n, 5)
-          for i, p in enumerate(outdated_s):
-              day   = 1 + (i * spread // max(n, 1))
-              new_d = (datetime.date.today() + datetime.timedelta(days=day)).isoformat()
-              patch(p["id"], {"Date": {"date": {"start": new_d}}})
-              print(f"Datum: {title(p)[:40]} -> {new_d}")
-              fixes += 1
-
-          # 3. Inbox kategorisieren
-          inbox = query(TASKS_DB, {"and": [
-              {"property": "Area",   "relation": {"is_empty":       True}},
-              {"property": "Status", "status":   {"does_not_equal": "Completed"}}
-          ]})
-          for p in inbox:
-              n2 = title(p).lower()
-              prio = ("High"   if any(w in n2 for w in ["uni","klausur","hausarbeit","pruefung","bafog","erasmus","abgabe"])
-                      else "Low" if any(w in n2 for w in ["irgendwann","spater","someday"])
-                      else "Medium")
-              patch(p["id"], {"Priority": {"select": {"name": prio}}})
-              print(f"Inbox: {title(p)[:40]} -> {prio}")
-              fixes += 1
-
-          # 4. Completed Tasks archivieren
-        completed = query(TASKS_DB, {
-            "filter": {"property": "Status", "status": {"equals": "Done"}}
-        })
-        for p in completed:
-            patch(p["id"], archived=True)
-            print(f"Archiviert: {title(p)[:50]}")
-            fixes += 1
-
-        # 5. Heutige Tasks auf High eskalieren
-        heute_tasks = query(TASKS_DB, {"filter": {"and": [
-            {"property": "Date", "date": {"equals": heute}},
-            {"property": "Status", "status": {"does_not_equal": "Completed"}}
-        ]}})
-        for p in heute_tasks:
-            prio = ((p.get("properties",{}).get("Priority") or {}).get("select") or {}).get("name","")
-            if prio != "High":
-                patch(p["id"], {"Priority": {"select": {"name": "High"}}})
-                print(f"Eskaliert (heute fällig): {title(p)[:40]}")
-                fixes += 1
-
-        # 6. Tasks ohne Datum → Datum nach Priorität zuweisen
-        no_date = query(TASKS_DB, {"filter": {"and": [
-            {"property": "Date", "date": {"is_empty": True}},
-            {"property": "Status", "status": {"does_not_equal": "Completed"}}
-        ]}})
-        PRIO_DAYS = {"High": 1, "Medium": 3, "Low": 5}
-        for p in no_date:
-            prio_name = ((p.get("properties",{}).get("Priority") or {}).get("select") or {}).get("name","Medium")
-            days = PRIO_DAYS.get(prio_name, 3)
-            new_d = (datetime.date.today() + datetime.timedelta(days=days)).isoformat()
-            patch(p["id"], {"Date": {"date": {"start": new_d}}})
-            print(f"Datum gesetzt: {title(p)[:40]} → {new_d} ({prio_name})")
-            fixes += 1
-
-        # 7. Stale "In progress" Tasks (>3 Tage unverändert) → zurück auf Not started
-        in_progress = query(TASKS_DB, {"filter":
-            {"property": "Status", "status": {"equals": "In progress"}}
-        })
-        cutoff = (datetime.date.today() - datetime.timedelta(days=3)).isoformat()
-        for p in in_progress:
-            edited = p.get("last_edited_time", "")[:10]
-            if edited and edited < cutoff:
-                patch(p["id"], {"Status": {"status": {"name": "Not started"}}})
-                print(f"Stale reset: {title(p)[:40]} (zuletzt: {edited})")
-                fixes += 1
-
-        print(f"\n{fixes} Fixes")
-          PYEOF
+      - name: "7 — In Progress >3 Tage → Not started"
+        run: |
+          python3 - <<'EOF'
+          import urllib.request, json, os
+          from datetime import datetime, timezone, timedelta
+          token = os.environ["NOTION_TOKEN"]
+          db = os.environ["TASKS_DB"]
+          headers = {"Authorization": f"Bearer {token}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"}
+          def api(method, path, data=None):
+            req = urllib.request.Request(f"https://api.notion.com/v1{path}", data=json.dumps(data).encode() if data else None, headers=headers, method=method)
+            with urllib.request.urlopen(req) as r: return json.loads(r.read())
+          cutoff = datetime.now(timezone.utc) - timedelta(days=3)
+          pages = api("POST", f"/databases/{db}/query", {"filter": {"property": "Status", "status": {"equals": "In progress"}}, "page_size": 100})
+          count = 0
+          for p in pages.get("results", []):
+            edited = p.get("last_edited_time", "")
+            if edited:
+              if datetime.fromisoformat(edited.replace("Z", "+00:00")) < cutoff:
+                api("PATCH", f"/pages/{p['id']}", {"properties": {"Status": {"status": {"name": "Not started"}}}})
+                t = p.get("properties", {}).get("Name", {}).get("title", [])
+                print(f"Reset: {(t[0]['plain_text'] if t else '?')[:50]}"); count += 1
+          print(f"✅ In Progress Reset: {count} zurückgesetzt")
+          EOF
