@@ -19,6 +19,7 @@ jobs:
 
     steps:
       - name: "1 — Dashboard Cleanup"
+        continue-on-error: true
         run: |
           python3 - <<'EOF'
           import urllib.request, json, os
@@ -33,13 +34,14 @@ jobs:
           for p in pages.get("results", []):
             t = p.get("properties", {}).get("Name", {}).get("title", [])
             name = t[0]["plain_text"] if t else ""
-            if not name.startswith("📚"):
+            if not name.startswith("\U0001f4da"):
               api("PATCH", f"/pages/{p['id']}", {"archived": True})
               print(f"Archiviert: {name[:60]}"); count += 1
           print(f"✅ Dashboard Cleanup: {count} archiviert")
           EOF
 
       - name: "2 — Alte Tasks: Datum nach vorne schieben"
+        continue-on-error: true
         run: |
           python3 - <<'EOF'
           import urllib.request, json, os
@@ -65,33 +67,8 @@ jobs:
           print(f"✅ Alte Tasks: {count} verschoben")
           EOF
 
-      - name: "3 — Inbox kategorisieren"
-        run: |
-          python3 - <<'EOF'
-          import urllib.request, json, os
-          token = os.environ["NOTION_TOKEN"]
-          db = os.environ["TASKS_DB"]
-          headers = {"Authorization": f"Bearer {token}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"}
-          def api(method, path, data=None):
-            req = urllib.request.Request(f"https://api.notion.com/v1{path}", data=json.dumps(data).encode() if data else None, headers=headers, method=method)
-            with urllib.request.urlopen(req) as r: return json.loads(r.read())
-          keywords = {"ZPO": "ZPO", "Zivilprozess": "ZPO", "FamR": "Familienrecht", "Familie": "Familienrecht", "HR": "Handelsrecht", "HGB": "Handelsrecht", "StR": "Strafrecht", "Straf": "Strafrecht", "VerwR": "Verwaltungsrecht", "BGB": "BGB AT", "Schuldrecht": "Schuldrecht", "EuR": "Europarecht", "Europa": "Europarecht", "Völker": "Völkerrecht"}
-          pages = api("POST", f"/databases/{db}/query", {"filter": {"property": "Status", "status": {"equals": "Not started"}}, "page_size": 100})
-          count = 0
-          for p in pages.get("results", []):
-            props = p.get("properties", {})
-            t = props.get("Name", {}).get("title", [])
-            name = t[0]["plain_text"] if t else ""
-            cat = props.get("Category", {}).get("select", None)
-            if cat: continue
-            for kw, fach in keywords.items():
-              if kw.lower() in name.lower():
-                api("PATCH", f"/pages/{p['id']}", {"properties": {"Category": {"select": {"name": fach}}}})
-                print(f"Kategorisiert: {name[:40]} → {fach}"); count += 1; break
-          print(f"✅ Inbox: {count} kategorisiert")
-          EOF
-
-      - name: "4 — Completed Tasks archivieren"
+      - name: "3 — Completed Tasks archivieren"
+        continue-on-error: true
         run: |
           python3 - <<'EOF'
           import urllib.request, json, os
@@ -110,7 +87,8 @@ jobs:
           print(f"✅ Completed: {count} archiviert")
           EOF
 
-      - name: "5 — Heutige Tasks → High Priority"
+      - name: "4 — Heutige Tasks → High Priority"
+        continue-on-error: true
         run: |
           python3 - <<'EOF'
           import urllib.request, json, os
@@ -134,7 +112,8 @@ jobs:
           print(f"✅ Heute: {count} auf High")
           EOF
 
-      - name: "6 — Tasks ohne Datum: Auto-Datum"
+      - name: "5 — Tasks ohne Datum: Auto-Datum"
+        continue-on-error: true
         run: |
           python3 - <<'EOF'
           import urllib.request, json, os
@@ -160,7 +139,8 @@ jobs:
           print(f"✅ Auto-Datum: {count} datiert")
           EOF
 
-      - name: "7 — In Progress >3 Tage → Not started"
+      - name: "6 — In Progress >3 Tage → Not started"
+        continue-on-error: true
         run: |
           python3 - <<'EOF'
           import urllib.request, json, os
